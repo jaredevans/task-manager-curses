@@ -4,7 +4,7 @@ import sqlite3
 import datetime
 import argparse
 
-DB_FILENAME = '/Users/jared.evans/python_projs/tasks/tasks.db'
+DB_FILENAME = 'tasks.db'
 
 def normalize_date(date_str):
     """
