@@ -99,9 +99,11 @@ def main(stdscr):
 
     # Enable color support and define our color pairs.
     curses.start_color()
-    curses.init_pair(1, curses.COLOR_RED, curses.COLOR_BLACK)      # Overdue
-    curses.init_pair(2, curses.COLOR_YELLOW, curses.COLOR_BLACK)   # Due Soon (approx orange)
-    curses.init_pair(3, curses.COLOR_GREEN, curses.COLOR_BLACK)    # Due Later
+    curses.init_pair(1, curses.COLOR_RED, curses.COLOR_BLACK)      # Overdue and bright red for due soon
+    curses.init_pair(2, curses.COLOR_YELLOW, curses.COLOR_BLACK)   # Due Soon (status text)
+    curses.init_pair(3, curses.COLOR_GREEN, curses.COLOR_BLACK)    # Due Later (status text)
+    curses.init_pair(4, curses.COLOR_WHITE, curses.COLOR_BLACK)    # Bright white for task text
+    curses.init_pair(5, curses.COLOR_CYAN, curses.COLOR_BLACK)     # Bright cyan for completion date
 
     # current_order is either 'pos' (default) or 'completion_date'
     current_order = 'pos'
@@ -170,22 +172,45 @@ def main(stdscr):
                 status = " "
                 status_color = curses.color_pair(3)
 
-            # Build the task string.
-            base_line = f"{idx + 1}. {text} | {details} | {comp_date} | "
+            # Split the task line into three parts:
+            # - text_part: task number and text (bright white, bold)
+            # - details_part: details (regular)
+            # - date_part: completion date (bright cyan normally, but bright red if "Needs Attention Now")
+            text_part = f"{idx + 1}. {text}"
+            details_part = f" | {details} | "
+            date_part = f"{comp_date} | "
+
             # Calculate the row relative to the visible window.
             row = (idx - scroll_offset) * 2
 
-            # Determine style based on selection or move mode.
-            if moving_task_index is not None and idx == moving_task_index:
-                base_style = curses.A_BOLD | curses.A_UNDERLINE
-            elif idx == current_selection:
-                base_style = curses.A_REVERSE
+            # Choose the base date color:
+            # If the task is "Needs Attention Now" (i.e. delta_days between 0 and 4), use bright red.
+            if 0 <= delta_days <= 4:
+                base_date_color = curses.color_pair(1)  # bright red
             else:
-                base_style = curses.A_NORMAL
+                base_date_color = curses.color_pair(5)  # bright cyan
+
+            # Determine styles.
+            if moving_task_index is not None and idx == moving_task_index:
+                text_style = curses.color_pair(4) | curses.A_BOLD | curses.A_UNDERLINE
+                details_style = curses.A_NORMAL
+                date_style = base_date_color | curses.A_BOLD | curses.A_UNDERLINE
+            elif idx == current_selection:
+                text_style = curses.color_pair(4) | curses.A_REVERSE | curses.A_BOLD
+                details_style = curses.A_REVERSE
+                date_style = base_date_color | curses.A_REVERSE | curses.A_BOLD
+            else:
+                text_style = curses.color_pair(4) | curses.A_BOLD
+                details_style = curses.A_NORMAL
+                date_style = base_date_color | curses.A_BOLD
 
             try:
-                stdscr.addstr(row, 0, base_line, base_style)
-                stdscr.addnstr(row, len(base_line), status, max_x - len(base_line), status_color)
+                stdscr.addstr(row, 0, text_part, text_style)
+                stdscr.addstr(row, len(text_part), details_part, details_style)
+                stdscr.addstr(row, len(text_part) + len(details_part), date_part, date_style)
+                stdscr.addnstr(row, len(text_part) + len(details_part) + len(date_part), status,
+                               max_x - (len(text_part) + len(details_part) + len(date_part)),
+                               status_color | curses.A_BOLD)
                 stdscr.addstr(row + 1, 0, "-" * (max_x - 1))
             except curses.error:
                 pass
