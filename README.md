@@ -1,5 +1,5 @@
 # task_manager_curses
-text-based curses / ncurses task manager for your console!
+Text-based curses / ncurses task manager for your console!
 
 To run:
 tasks.py --db ~/tasks.db
