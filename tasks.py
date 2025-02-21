@@ -98,7 +98,7 @@ def new_task_dialog(stdscr):
     Display a text-based dialog box for creating a new task.
     Allows the user to fill in three fields (task, completion date, task details)
     and then select one of two buttons: OK or CANCEL.
-    
+
     The user uses TAB (or up/down arrow keys) to move between fields.
     ENTER on OK returns a tuple (task, completion_date, details);
     ENTER on CANCEL returns None.
@@ -109,13 +109,13 @@ def new_task_dialog(stdscr):
     dy, dx = (sh - dh) // 2, (sw - dw) // 2
     win = curses.newwin(dh, dw, dy, dx)
     win.keypad(True)
-    
+
     # Fields: indices 0-2 are input fields.
     fields = ["", "", ""]
     prompts = ["Task:", "Completion Date (MM/DD):", "Task Details:"]
     # Define button indices: 3 for OK, 4 for CANCEL.
     current_field = 0  # will cycle 0,1,2,3,4
-    
+
     while True:
         win.clear()
         win.border()
@@ -145,7 +145,7 @@ def new_task_dialog(stdscr):
         else:
             win.addstr(btn_y, cancel_x, cancel_label)
         win.refresh()
-        
+
         key = win.getch()
         if key == 9:  # TAB
             current_field = (current_field + 1) % 5
@@ -179,9 +179,9 @@ def main(stdscr):
 
     # Enable color support and define our color pairs.
     curses.start_color()
-    curses.init_pair(1, curses.COLOR_RED, curses.COLOR_BLACK)      # Overdue and red (for due soon date)
-    curses.init_pair(2, curses.COLOR_YELLOW, curses.COLOR_BLACK)   # Due Soon (status text)
-    curses.init_pair(3, curses.COLOR_GREEN, curses.COLOR_BLACK)    # Due Later (status text)
+    curses.init_pair(1, curses.COLOR_RED, curses.COLOR_BLACK)      # Overdue and due soon (red)
+    curses.init_pair(2, curses.COLOR_YELLOW, curses.COLOR_BLACK)   # Due soon (yellow)
+    curses.init_pair(3, curses.COLOR_GREEN, curses.COLOR_BLACK)    # Due later (green)
     curses.init_pair(4, curses.COLOR_WHITE, curses.COLOR_BLACK)    # Bright white for task text
     curses.init_pair(5, curses.COLOR_CYAN, curses.COLOR_BLACK)     # Bright cyan for completion date
 
@@ -252,22 +252,24 @@ def main(stdscr):
                 status = " "
                 status_color = curses.color_pair(3)
 
-            # Split the task line into three parts:
-            # - text_part: task number and text (bright white, bold)
-            # - details_part: details (regular)
-            # - date_part: completion date (bright cyan normally, bright red if due soon)
+            # Build the string parts.
             text_part = f"{idx + 1}. {text}"
             details_part = f" | {details} | "
             date_part = f"{comp_date} | "
 
+            # New field: days difference.
+            if delta_days > 0:
+                days_field = f"{delta_days} days left | "
+            elif delta_days < 0:
+                days_field = f"{abs(delta_days)} days ago | "
+            else:
+                days_field = "Today | "
+
             # Calculate the row relative to the visible window.
             row = (idx - scroll_offset) * 2
 
-            # Choose the base date color:
-            if 0 <= delta_days <= 4:
-                base_date_color = curses.color_pair(1)  # bright red
-            else:
-                base_date_color = curses.color_pair(5)  # bright cyan
+            # Choose base date color.
+            base_date_color = curses.color_pair(1) if (0 <= delta_days <= 4) else curses.color_pair(5)
 
             # Determine styles.
             if moving_task_index is not None and idx == moving_task_index:
@@ -287,10 +289,14 @@ def main(stdscr):
                 stdscr.addstr(row, 0, text_part, text_style)
                 stdscr.addstr(row, len(text_part), details_part, details_style)
                 stdscr.addstr(row, len(text_part) + len(details_part), date_part, date_style)
-                stdscr.addnstr(row, len(text_part) + len(details_part) + len(date_part),
-                               status,
-                               max_x - (len(text_part) + len(details_part) + len(date_part)),
-                               status_color | curses.A_BOLD)
+                stdscr.addstr(row, len(text_part) + len(details_part) + len(date_part), days_field, date_style)
+                stdscr.addnstr(
+                    row,
+                    len(text_part) + len(details_part) + len(date_part) + len(days_field),
+                    status,
+                    max_x - (len(text_part) + len(details_part) + len(date_part) + len(days_field)),
+                    status_color | curses.A_BOLD
+                )
                 stdscr.addstr(row + 1, 0, "-" * (max_x - 1))
             except curses.error:
                 pass
