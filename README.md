@@ -1,4 +1,4 @@
-# task_manager_curses
+# task-manager-curses
 Text-based curses / ncurses task manager for your console!
 
 To run:
