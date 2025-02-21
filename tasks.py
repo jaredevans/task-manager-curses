@@ -94,6 +94,18 @@ def toggle_task_done(conn, task_id, current_done):
     cur.execute('UPDATE tasks SET done = ? WHERE id = ?', (new_done, task_id))
     conn.commit()
 
+def update_task_info(conn, task_id, text, completion_date, details):
+    """
+    Update the text, completion_date, and details of a task.
+    """
+    cur = conn.cursor()
+    cur.execute('''
+        UPDATE tasks 
+        SET text = ?, completion_date = ?, details = ?
+        WHERE id = ?
+    ''', (text, completion_date, details, task_id))
+    conn.commit()
+
 def input_task(stdscr, prompt):
     """
     Display a prompt and allow the user to enter a line of text.
@@ -114,37 +126,52 @@ def new_task_dialog(stdscr):
     ENTER on OK returns a tuple (task, completion_date, details);
     ENTER on CANCEL returns None.
     """
-    # Determine dialog window size and position (centered)
+    return dialog_template(stdscr, "", "", "", "New Task")
+
+def edit_task_dialog(stdscr, initial_text, initial_date, initial_details):
+    """
+    Display a dialog box for editing an existing task.
+    The fields are pre-filled with initial_text, initial_date, and initial_details.
+    Returns a tuple (task, completion_date, details) if OK is selected,
+    or None if CANCEL is chosen.
+    """
+    return dialog_template(stdscr, initial_text, initial_date, initial_details, "Edit Task")
+
+def dialog_template(stdscr, init_text, init_date, init_details, title):
+    """
+    Generic dialog box template used for both new and edit dialogs.
+    It displays three fields and two buttons.
+    Returns a tuple (text, date, details) if OK is selected, else None.
+    """
     sh, sw = stdscr.getmaxyx()
-    dh, dw = 9, 50
+    dh, dw = 11, 60  # increased height to show title and more space
     dy, dx = (sh - dh) // 2, (sw - dw) // 2
     win = curses.newwin(dh, dw, dy, dx)
     win.keypad(True)
 
-    # Fields: indices 0-2 are input fields.
-    fields = ["", "", ""]
+    # Pre-populate the fields
+    fields = [init_text, init_date, init_details]
     prompts = ["Task:", "Completion Date (MM/DD):", "Task Details:"]
-    # Define button indices: 3 for OK, 4 for CANCEL.
-    current_field = 0  # will cycle 0,1,2,3,4
+    current_field = 0  # cycles through 0,1,2,3,4 where 3=OK, 4=CANCEL
 
     while True:
         win.clear()
         win.border()
+        # Title centered at the top
+        win.addstr(0, (dw - len(title)) // 2, title, curses.A_BOLD)
         # Display the three fields
         for i, prompt in enumerate(prompts):
-            win.addstr(1 + i*2, 2, prompt)
-            # Display field content; if active, use reverse attribute.
+            win.addstr(2 + i*2, 2, prompt)
             content = fields[i]
             field_x = 2 + len(prompt) + 1
             if current_field == i:
-                win.addstr(1 + i*2, field_x, content + " " * (dw - field_x - 2 - len(content)), curses.A_REVERSE)
+                win.addstr(2 + i*2, field_x, content + " " * (dw - field_x - 2 - len(content)), curses.A_REVERSE)
             else:
-                win.addstr(1 + i*2, field_x, content)
-        # Display buttons on row 7 (index dh-2)
-        btn_y = dh - 2
+                win.addstr(2 + i*2, field_x, content)
+        # Display buttons on the bottom row (position dh-2)
+        btn_y = dh - 3
         ok_label = "[ OK ]"
         cancel_label = "[ CANCEL ]"
-        # Position buttons approximately centered
         ok_x = dw // 2 - len(ok_label) - 2
         cancel_x = dw // 2 + 2
         if current_field == 3:
@@ -165,24 +192,19 @@ def new_task_dialog(stdscr):
         elif key in [curses.KEY_UP]:
             current_field = (current_field - 1) % 5
         elif current_field < 3:
-            # We're editing one of the text fields.
             if key in [curses.KEY_ENTER, 10, 13]:
-                # On ENTER, move to next field.
                 current_field = (current_field + 1) % 5
             elif key in [curses.KEY_BACKSPACE, 127, 8]:
                 if fields[current_field]:
                     fields[current_field] = fields[current_field][:-1]
             elif 32 <= key <= 126:
-                # Append the printable character.
                 fields[current_field] += chr(key)
         else:
-            # We are on a button.
             if key in [curses.KEY_ENTER, 10, 13]:
-                if current_field == 3:  # OK button
+                if current_field == 3:  # OK
                     return tuple(fields)
-                else:  # CANCEL button
+                else:  # CANCEL
                     return None
-    # End of dialog loop
 
 def main(stdscr):
     conn = init_db()
@@ -198,11 +220,9 @@ def main(stdscr):
 
     # Define a custom dark grey color (if supported).
     if curses.can_change_color():
-        # Create a dark grey color (RGB values scaled from 0 to 1000).
         curses.init_color(8, 300, 300, 300)  # dark grey
         curses.init_pair(6, 8, curses.COLOR_BLACK)
     else:
-        # Fallback: use white if we cannot change colors.
         curses.init_pair(6, curses.COLOR_WHITE, curses.COLOR_BLACK)
 
     # current_order is either 'pos' (default) or 'completion_date'
@@ -211,13 +231,10 @@ def main(stdscr):
     moving_task_index = None
     reorder_list = None
 
-    # scroll_offset indicates the index of the first task being rendered.
     scroll_offset = 0
     while True:
         stdscr.clear()
         max_y, max_x = stdscr.getmaxyx()
-
-        # Reserve 2 rows for instructions (or warning message)
         visible_tasks = (max_y - 2) // 2
         if visible_tasks < 1:
             stdscr.clear()
@@ -228,19 +245,16 @@ def main(stdscr):
                 break
             continue
 
-        # When not in move mode, fetch tasks using the current_order criteria.
         if moving_task_index is None:
             tasks = get_tasks(conn, current_order)
         else:
             tasks = reorder_list
         num_tasks = len(tasks)
-        # Ensure current_selection is within bounds.
         if current_selection >= num_tasks:
             current_selection = num_tasks - 1
         if current_selection < 0:
             current_selection = 0
 
-        # Adjust scroll_offset so the current selection is visible.
         if current_selection < scroll_offset:
             scroll_offset = current_selection
         elif current_selection >= scroll_offset + visible_tasks:
@@ -249,17 +263,14 @@ def main(stdscr):
         today = datetime.date.today()
         current_year = today.year
 
-        # Render only the visible subset of tasks.
         for idx in range(scroll_offset, min(num_tasks, scroll_offset + visible_tasks)):
             task = tasks[idx]
             task_id, text, pos, comp_date, details, done = task
-
-            # Determine due status based on the completion date.
             try:
                 month, day = map(int, comp_date.split('/'))
                 due_date = datetime.date(current_year, month, day)
             except Exception:
-                due_date = today  # fallback if parsing fails
+                due_date = today
 
             delta_days = (due_date - today).days
             if delta_days < 0:
@@ -272,12 +283,10 @@ def main(stdscr):
                 status = " "
                 status_color = curses.color_pair(3)
 
-            # Build the string parts.
             text_part = f"{idx + 1}. {text}"
             details_part = f" | {details} | "
             date_part = f"{comp_date} | "
 
-            # New field: days difference.
             if delta_days > 0:
                 days_field = f"{delta_days} days left | "
             elif delta_days < 0:
@@ -285,19 +294,13 @@ def main(stdscr):
             else:
                 days_field = "Today | "
 
-            # Calculate the row relative to the visible window.
             row = (idx - scroll_offset) * 2
-
-            # Choose base date color.
             base_date_color = curses.color_pair(1) if (0 <= delta_days <= 4) else curses.color_pair(5)
-
-            # For tasks marked as done, use the dark grey color pair.
             if done:
                 task_text_color = curses.color_pair(6)
             else:
                 task_text_color = curses.color_pair(4) | curses.A_BOLD
 
-            # Determine styles based on selection and move mode.
             if moving_task_index is not None and idx == moving_task_index:
                 text_style = task_text_color | curses.A_UNDERLINE
                 details_style = curses.A_NORMAL
@@ -327,10 +330,9 @@ def main(stdscr):
             except curses.error:
                 pass
 
-        # Display instructions at the bottom.
         if moving_task_index is None:
             instruction = ("Press 'a' to add, 'Del' to remove, space to move, "
-                           "'d' to toggle done, 'o' to change ordering, 'q' to quit. Use up/down to scroll.")
+                           "'d' to toggle done, 'e' to edit, 'o' to change ordering, 'q' to quit. Use up/down to scroll.")
         else:
             instruction = "Moving task. Use arrow keys to reposition. Press space to confirm new order."
         try:
@@ -373,10 +375,8 @@ def main(stdscr):
             current_selection = 0
             scroll_offset = 0
         elif key == ord('a') and moving_task_index is None:
-            # Instead of individual input prompts, open the new-task dialog.
             new_task = new_task_dialog(stdscr)
             if new_task is not None:
-                # Unpack the tuple and normalize the date.
                 task_text, task_date, task_details = new_task
                 task_date = normalize_date(task_date)
                 add_task(conn, task_text, task_date, task_details)
@@ -393,14 +393,24 @@ def main(stdscr):
                     current_selection = max(0, len(tasks) - 1)
                 scroll_offset = 0
         elif key == ord('d') and moving_task_index is None:
-            # Toggle done status.
             if num_tasks > 0:
                 task = tasks[current_selection]
                 task_id, _, _, _, _, done = task
                 toggle_task_done(conn, task_id, done)
+        elif key == ord('e') and moving_task_index is None:
+            if num_tasks > 0:
+                # Retrieve current task values
+                task = tasks[current_selection]
+                task_id, text, pos, comp_date, details, done = task
+                # Open edit dialog pre-filled with current values.
+                edited = edit_task_dialog(stdscr, text, comp_date, details)
+                if edited is not None:
+                    new_text, new_date, new_details = edited
+                    new_date = normalize_date(new_date)
+                    update_task_info(conn, task_id, new_text, new_date, new_details)
         elif key == ord(' '):
             if current_order != 'pos':
-                curses.flash()  # reordering is allowed only when ordering by 'pos'
+                curses.flash()
             else:
                 if moving_task_index is None:
                     reorder_list = get_tasks(conn, current_order)
@@ -417,5 +427,5 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="Task Manager using curses")
     parser.add_argument('--db', default=DB_FILENAME, help="Path to tasks.db")
     args = parser.parse_args()
-    DB_FILENAME = args.db  # Update the global DB_FILENAME with the provided argument.
+    DB_FILENAME = args.db
     curses.wrapper(main)
