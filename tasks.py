@@ -18,7 +18,7 @@ def normalize_date(date_str):
 def init_db():
     """
     Initialize the database and create the tasks table with 'pos', 'completion_date',
-    and 'details' columns.
+    'details', and 'done' columns.
     """
     conn = sqlite3.connect(DB_FILENAME)
     cur = conn.cursor()
@@ -28,7 +28,8 @@ def init_db():
             text TEXT NOT NULL,
             pos INTEGER NOT NULL,
             completion_date TEXT NOT NULL,
-            details TEXT NOT NULL
+            details TEXT NOT NULL,
+            done INTEGER NOT NULL DEFAULT 0
         )
     ''')
     conn.commit()
@@ -37,14 +38,16 @@ def init_db():
 def add_task(conn, text, completion_date, details):
     """
     Insert a new task into the database.
-    The new task is appended at the end (largest 'pos' value).
+    The new task is appended at the end (largest 'pos' value) and marked as not done.
     """
     cur = conn.cursor()
     cur.execute('SELECT MAX(pos) FROM tasks')
     max_pos = cur.fetchone()[0]
     new_pos = 0 if max_pos is None else max_pos + 1
-    cur.execute('INSERT INTO tasks (text, pos, completion_date, details) VALUES (?, ?, ?, ?)',
-                (text, new_pos, completion_date, details))
+    cur.execute('''
+        INSERT INTO tasks (text, pos, completion_date, details, done)
+        VALUES (?, ?, ?, ?, 0)
+    ''', (text, new_pos, completion_date, details))
     conn.commit()
 
 def delete_task(conn, task_id):
@@ -60,26 +63,35 @@ def get_tasks(conn, order_by='pos'):
     Retrieve all tasks from the database.
     When order_by is 'pos' they are sorted by the pos column;
     when 'completion_date', sorted by the completion_date column.
-    Returns a list of tuples: (id, text, pos, completion_date, details).
+    Returns a list of tuples: (id, text, pos, completion_date, details, done).
     """
     cur = conn.cursor()
     if order_by == 'pos':
-        cur.execute('SELECT id, text, pos, completion_date, details FROM tasks ORDER BY pos')
+        cur.execute('SELECT id, text, pos, completion_date, details, done FROM tasks ORDER BY pos')
     elif order_by == 'completion_date':
-        cur.execute('SELECT id, text, pos, completion_date, details FROM tasks ORDER BY completion_date')
+        cur.execute('SELECT id, text, pos, completion_date, details, done FROM tasks ORDER BY completion_date')
     else:
-        cur.execute('SELECT id, text, pos, completion_date, details FROM tasks ORDER BY pos')
+        cur.execute('SELECT id, text, pos, completion_date, details, done FROM tasks ORDER BY pos')
     return cur.fetchall()
 
 def update_task_order(conn, tasks_order):
     """
-    Given a list of tasks (each a tuple of (id, text, pos, completion_date, details))
+    Given a list of tasks (each a tuple of (id, text, pos, completion_date, details, done))
     in the new order, update the 'pos' values in the database.
     """
     cur = conn.cursor()
     for new_pos, task in enumerate(tasks_order):
         task_id = task[0]
         cur.execute('UPDATE tasks SET pos = ? WHERE id = ?', (new_pos, task_id))
+    conn.commit()
+
+def toggle_task_done(conn, task_id, current_done):
+    """
+    Toggle the 'done' status of a task.
+    """
+    new_done = 0 if current_done else 1
+    cur = conn.cursor()
+    cur.execute('UPDATE tasks SET done = ? WHERE id = ?', (new_done, task_id))
     conn.commit()
 
 def input_task(stdscr, prompt):
@@ -98,7 +110,6 @@ def new_task_dialog(stdscr):
     Display a text-based dialog box for creating a new task.
     Allows the user to fill in three fields (task, completion date, task details)
     and then select one of two buttons: OK or CANCEL.
-
     The user uses TAB (or up/down arrow keys) to move between fields.
     ENTER on OK returns a tuple (task, completion_date, details);
     ENTER on CANCEL returns None.
@@ -185,6 +196,15 @@ def main(stdscr):
     curses.init_pair(4, curses.COLOR_WHITE, curses.COLOR_BLACK)    # Bright white for task text
     curses.init_pair(5, curses.COLOR_CYAN, curses.COLOR_BLACK)     # Bright cyan for completion date
 
+    # Define a custom dark grey color (if supported).
+    if curses.can_change_color():
+        # Create a dark grey color (RGB values scaled from 0 to 1000).
+        curses.init_color(8, 300, 300, 300)  # dark grey
+        curses.init_pair(6, 8, curses.COLOR_BLACK)
+    else:
+        # Fallback: use white if we cannot change colors.
+        curses.init_pair(6, curses.COLOR_WHITE, curses.COLOR_BLACK)
+
     # current_order is either 'pos' (default) or 'completion_date'
     current_order = 'pos'
     current_selection = 0  # index of highlighted task
@@ -232,7 +252,7 @@ def main(stdscr):
         # Render only the visible subset of tasks.
         for idx in range(scroll_offset, min(num_tasks, scroll_offset + visible_tasks)):
             task = tasks[idx]
-            task_id, text, pos, comp_date, details = task
+            task_id, text, pos, comp_date, details, done = task
 
             # Determine due status based on the completion date.
             try:
@@ -271,19 +291,25 @@ def main(stdscr):
             # Choose base date color.
             base_date_color = curses.color_pair(1) if (0 <= delta_days <= 4) else curses.color_pair(5)
 
-            # Determine styles.
-            if moving_task_index is not None and idx == moving_task_index:
-                text_style = curses.color_pair(4) | curses.A_BOLD | curses.A_UNDERLINE
-                details_style = curses.A_NORMAL
-                date_style = base_date_color | curses.A_BOLD | curses.A_UNDERLINE
-            elif idx == current_selection:
-                text_style = curses.color_pair(4) | curses.A_REVERSE | curses.A_BOLD
-                details_style = curses.A_REVERSE
-                date_style = base_date_color | curses.A_REVERSE | curses.A_BOLD
+            # For tasks marked as done, use the dark grey color pair.
+            if done:
+                task_text_color = curses.color_pair(6)
             else:
-                text_style = curses.color_pair(4) | curses.A_BOLD
+                task_text_color = curses.color_pair(4) | curses.A_BOLD
+
+            # Determine styles based on selection and move mode.
+            if moving_task_index is not None and idx == moving_task_index:
+                text_style = task_text_color | curses.A_UNDERLINE
                 details_style = curses.A_NORMAL
-                date_style = base_date_color | curses.A_BOLD
+                date_style = base_date_color | curses.A_UNDERLINE
+            elif idx == current_selection:
+                text_style = task_text_color | curses.A_REVERSE
+                details_style = curses.A_REVERSE
+                date_style = base_date_color | curses.A_REVERSE
+            else:
+                text_style = task_text_color
+                details_style = curses.A_NORMAL
+                date_style = base_date_color
 
             try:
                 stdscr.addstr(row, 0, text_part, text_style)
@@ -304,7 +330,7 @@ def main(stdscr):
         # Display instructions at the bottom.
         if moving_task_index is None:
             instruction = ("Press 'a' to add, 'Del' to remove, space to move, "
-                           "'o' to change ordering, 'q' to quit. Use up/down to scroll.")
+                           "'d' to toggle done, 'o' to change ordering, 'q' to quit. Use up/down to scroll.")
         else:
             instruction = "Moving task. Use arrow keys to reposition. Press space to confirm new order."
         try:
@@ -366,6 +392,12 @@ def main(stdscr):
                 if current_selection >= len(tasks):
                     current_selection = max(0, len(tasks) - 1)
                 scroll_offset = 0
+        elif key == ord('d') and moving_task_index is None:
+            # Toggle done status.
+            if num_tasks > 0:
+                task = tasks[current_selection]
+                task_id, _, _, _, _, done = task
+                toggle_task_done(conn, task_id, done)
         elif key == ord(' '):
             if current_order != 'pos':
                 curses.flash()  # reordering is allowed only when ordering by 'pos'
