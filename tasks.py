@@ -93,13 +93,93 @@ def input_task(stdscr, prompt):
     curses.noecho()
     return text
 
+def new_task_dialog(stdscr):
+    """
+    Display a text-based dialog box for creating a new task.
+    Allows the user to fill in three fields (task, completion date, task details)
+    and then select one of two buttons: OK or CANCEL.
+    
+    The user uses TAB (or up/down arrow keys) to move between fields.
+    ENTER on OK returns a tuple (task, completion_date, details);
+    ENTER on CANCEL returns None.
+    """
+    # Determine dialog window size and position (centered)
+    sh, sw = stdscr.getmaxyx()
+    dh, dw = 9, 50
+    dy, dx = (sh - dh) // 2, (sw - dw) // 2
+    win = curses.newwin(dh, dw, dy, dx)
+    win.keypad(True)
+    
+    # Fields: indices 0-2 are input fields.
+    fields = ["", "", ""]
+    prompts = ["Task:", "Completion Date (MM/DD):", "Task Details:"]
+    # Define button indices: 3 for OK, 4 for CANCEL.
+    current_field = 0  # will cycle 0,1,2,3,4
+    
+    while True:
+        win.clear()
+        win.border()
+        # Display the three fields
+        for i, prompt in enumerate(prompts):
+            win.addstr(1 + i*2, 2, prompt)
+            # Display field content; if active, use reverse attribute.
+            content = fields[i]
+            field_x = 2 + len(prompt) + 1
+            if current_field == i:
+                win.addstr(1 + i*2, field_x, content + " " * (dw - field_x - 2 - len(content)), curses.A_REVERSE)
+            else:
+                win.addstr(1 + i*2, field_x, content)
+        # Display buttons on row 7 (index dh-2)
+        btn_y = dh - 2
+        ok_label = "[ OK ]"
+        cancel_label = "[ CANCEL ]"
+        # Position buttons approximately centered
+        ok_x = dw // 2 - len(ok_label) - 2
+        cancel_x = dw // 2 + 2
+        if current_field == 3:
+            win.addstr(btn_y, ok_x, ok_label, curses.A_REVERSE)
+        else:
+            win.addstr(btn_y, ok_x, ok_label)
+        if current_field == 4:
+            win.addstr(btn_y, cancel_x, cancel_label, curses.A_REVERSE)
+        else:
+            win.addstr(btn_y, cancel_x, cancel_label)
+        win.refresh()
+        
+        key = win.getch()
+        if key == 9:  # TAB
+            current_field = (current_field + 1) % 5
+        elif key in [curses.KEY_DOWN]:
+            current_field = (current_field + 1) % 5
+        elif key in [curses.KEY_UP]:
+            current_field = (current_field - 1) % 5
+        elif current_field < 3:
+            # We're editing one of the text fields.
+            if key in [curses.KEY_ENTER, 10, 13]:
+                # On ENTER, move to next field.
+                current_field = (current_field + 1) % 5
+            elif key in [curses.KEY_BACKSPACE, 127, 8]:
+                if fields[current_field]:
+                    fields[current_field] = fields[current_field][:-1]
+            elif 32 <= key <= 126:
+                # Append the printable character.
+                fields[current_field] += chr(key)
+        else:
+            # We are on a button.
+            if key in [curses.KEY_ENTER, 10, 13]:
+                if current_field == 3:  # OK button
+                    return tuple(fields)
+                else:  # CANCEL button
+                    return None
+    # End of dialog loop
+
 def main(stdscr):
     conn = init_db()
     curses.curs_set(0)  # hide the cursor
 
     # Enable color support and define our color pairs.
     curses.start_color()
-    curses.init_pair(1, curses.COLOR_RED, curses.COLOR_BLACK)      # Overdue and bright red for due soon
+    curses.init_pair(1, curses.COLOR_RED, curses.COLOR_BLACK)      # Overdue and red (for due soon date)
     curses.init_pair(2, curses.COLOR_YELLOW, curses.COLOR_BLACK)   # Due Soon (status text)
     curses.init_pair(3, curses.COLOR_GREEN, curses.COLOR_BLACK)    # Due Later (status text)
     curses.init_pair(4, curses.COLOR_WHITE, curses.COLOR_BLACK)    # Bright white for task text
@@ -175,7 +255,7 @@ def main(stdscr):
             # Split the task line into three parts:
             # - text_part: task number and text (bright white, bold)
             # - details_part: details (regular)
-            # - date_part: completion date (bright cyan normally, but bright red if "Needs Attention Now")
+            # - date_part: completion date (bright cyan normally, bright red if due soon)
             text_part = f"{idx + 1}. {text}"
             details_part = f" | {details} | "
             date_part = f"{comp_date} | "
@@ -184,7 +264,6 @@ def main(stdscr):
             row = (idx - scroll_offset) * 2
 
             # Choose the base date color:
-            # If the task is "Needs Attention Now" (i.e. delta_days between 0 and 4), use bright red.
             if 0 <= delta_days <= 4:
                 base_date_color = curses.color_pair(1)  # bright red
             else:
@@ -208,7 +287,8 @@ def main(stdscr):
                 stdscr.addstr(row, 0, text_part, text_style)
                 stdscr.addstr(row, len(text_part), details_part, details_style)
                 stdscr.addstr(row, len(text_part) + len(details_part), date_part, date_style)
-                stdscr.addnstr(row, len(text_part) + len(details_part) + len(date_part), status,
+                stdscr.addnstr(row, len(text_part) + len(details_part) + len(date_part),
+                               status,
                                max_x - (len(text_part) + len(details_part) + len(date_part)),
                                status_color | curses.A_BOLD)
                 stdscr.addstr(row + 1, 0, "-" * (max_x - 1))
@@ -261,18 +341,18 @@ def main(stdscr):
             current_selection = 0
             scroll_offset = 0
         elif key == ord('a') and moving_task_index is None:
-            stdscr.clear()
-            task_text = input_task(stdscr, "Enter new task: ")
-            task_date = input_task(stdscr, "Enter completion date (MM/DD): ")
-            task_date = normalize_date(task_date)
-            task_details = input_task(stdscr, "Enter details: ")
-            if task_text.strip() and task_date.strip() and task_details.strip():
+            # Instead of individual input prompts, open the new-task dialog.
+            new_task = new_task_dialog(stdscr)
+            if new_task is not None:
+                # Unpack the tuple and normalize the date.
+                task_text, task_date, task_details = new_task
+                task_date = normalize_date(task_date)
                 add_task(conn, task_text, task_date, task_details)
                 tasks = get_tasks(conn, current_order)
                 current_selection = len(tasks) - 1
                 if current_selection >= scroll_offset + visible_tasks:
                     scroll_offset = current_selection - visible_tasks + 1
-        elif key == curses.KEY_DC and moving_task_index is None:
+        elif key in (curses.KEY_DC, curses.KEY_BACKSPACE, 127) and moving_task_index is None:
             if num_tasks > 0:
                 task_id = tasks[current_selection][0]
                 delete_task(conn, task_id)
