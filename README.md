@@ -55,6 +55,40 @@ python tasks.py --oauth --client-secret ~/path/to/client_secret.json
 
 ---
 
+## Using Multiple Google Accounts
+
+You can keep **separate tokens** for personal and work Google accounts so you can switch between them. Note: you can keep the same client_secret.json for both.
+
+- Run OAuth with a specific token path for each account:
+- 
+  ```bash
+  # Personal account
+  python tasks.py --oauth \
+      --client-secret ~/path/to/client_secret.json \
+      --token ~/tasks_personal_token.json
+
+  # Work account
+  python tasks.py --oauth \
+      --client-secret ~/path/to/client_secret.json \
+      --token ~/tasks_work_token.json
+  ```
+
+- When running normally, point to the correct token:
+- 
+  ```bash
+  # Use personal account
+  python tasks.py --db ~/tasks_personal.db \
+      --token ~/tasks_personal_token.json
+
+  # Use work account
+  python tasks.py --db ~/tasks_work.db \
+      --token ~/tasks_work_token.json
+  ```
+
+💡 **Tip:** You can store both personal and work task lists in the same database if you want, but keeping them in separate `.db` files makes it easier to keep them fully independent.
+
+---
+
 ## First, the Google Tasks API Setup
 
 ### 1) Create/select a Google Cloud project
@@ -93,12 +127,14 @@ Options:
 
 - Put it in the same directory as `tasks.py` (rename to `client_secret.json`)
 
-- Or pass path with `--client-secret`: (if not renaming)
+- Or pass path with `--client-secret` (if not renaming):
 
   ```bash
   python tasks.py --oauth --client-secret ~/Downloads/client_secret_xxx.json
   ```
+
 - Or set an env var:
+
   ```bash
   export GOOGLE_CLIENT_SECRET=~/Downloads/client_secret_xxx.json
   ```
@@ -116,6 +152,7 @@ This will:
 
 - Open browser for consent
 - Save the token (`token.json` by default, or path from `--token`)
+- Rename this token for personal or work
 
 ---
 
@@ -131,5 +168,4 @@ Adding new task:
 
 ## Notes
 - If Google Tasks sync fails, see `sync.log` for error details.
-
----
+- Use `--token` to easily switch between personal and work accounts.
