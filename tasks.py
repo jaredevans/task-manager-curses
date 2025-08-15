@@ -7,7 +7,8 @@ import argparse
 import os
 import sys
 import traceback
-from typing import Optional
+import time
+from typing import Optional, List, Tuple
 
 # ---- Google Tasks deps (installed via pip) ----
 from google.auth.transport.requests import Request
@@ -64,7 +65,6 @@ def rfc3339_to_mmdd(rfc: str) -> str:
 def notify_popup(stdscr, msg: str, wait_for_key=True):
     """Centered modal message so it won't get overwritten by the main loop."""
     if stdscr is None:
-        # headless mode: just print
         print(msg)
         if wait_for_key:
             try:
@@ -90,7 +90,6 @@ def notify_popup(stdscr, msg: str, wait_for_key=True):
         if wait_for_key:
             win.getch()
     except curses.error:
-        # Fallback to last-line notify if window is too small
         _notify(stdscr, msg)
         if wait_for_key:
             stdscr.getch()
@@ -162,12 +161,10 @@ def add_task(conn, text, completion_date, details, mark_dirty=True):
     conn.commit()
 
 def delete_task(conn, task_id, mark_dirty=True):
-    # If it's bound to a google_id, mark as deleted remotely by storing a tombstone record in a side table
     cur = conn.cursor()
     cur.execute('SELECT google_id FROM tasks WHERE id=?', (task_id,))
     row = cur.fetchone()
     if row and row[0]:
-        # Create a minimal deletion queue table if not exists
         cur.execute('''CREATE TABLE IF NOT EXISTS deletions (
             google_id TEXT PRIMARY KEY
         )''')
@@ -229,7 +226,6 @@ def _find_client_secret(path_hint: Optional[str]) -> Optional[str]:
     return None
 
 def _find_token_path(path_hint: Optional[str]) -> str:
-    # default to provided hint or env or ./token.json
     if path_hint:
         return _resolve_path(path_hint)
     return _resolve_path(GOOGLE_TOKEN)
@@ -316,8 +312,7 @@ def push_local_changes(conn, service, stdscr=None):
         try:
             service.tasks().delete(tasklist=tasklist, task=gid).execute()
         except Exception:
-            # If already gone, ignore
-            pass
+            pass  # already gone is fine
     if to_delete:
         cur.execute('DELETE FROM deletions')
         conn.commit()
@@ -331,35 +326,29 @@ def push_local_changes(conn, service, stdscr=None):
             'title': r['text'] or '',
             'notes': r['details'] or ''
         }
-        # Due date (yearless locally -> current year in UTC midnight)
         due_iso = mmdd_to_rfc3339(r['completion_date'])
         if due_iso:
             payload['due'] = due_iso
 
-        # Status + explicit completion timestamp when done
         if r['done']:
             payload['status'] = 'completed'
             payload['completed'] = datetime.datetime.now(datetime.timezone.utc).isoformat().replace('+00:00', 'Z')
         else:
             payload['status'] = 'needsAction'
-            # Do not send 'completed' to avoid fighting server-side behavior
 
         try:
             if r['google_id']:
-                # Update existing
                 resp = service.tasks().patch(
                     tasklist=tasklist,
                     task=r['google_id'],
                     body=payload
                 ).execute()
             else:
-                # Create new
                 resp = service.tasks().insert(
                     tasklist=tasklist,
                     body=payload
                 ).execute()
 
-            # Persist mapping / clear dirty
             cur.execute('''
                 UPDATE tasks SET google_id=?, etag=?, updated=?, dirty=0 WHERE id=?
             ''', (resp.get('id'), resp.get('etag'), resp.get('updated'), rid))
@@ -390,7 +379,7 @@ def pull_remote_changes(conn, service, stdscr=None):
         if r['google_id']:
             local_by_gid[r['google_id']] = r
 
-    # Pull all tasks, including completed & hidden (e.g., after "Clear completed")
+    # Pull all tasks, including completed & hidden
     page_token = None
     remote_items = []
     while True:
@@ -424,7 +413,6 @@ def pull_remote_changes(conn, service, stdscr=None):
 
         if gid in local_by_gid:
             local = local_by_gid[gid]
-            # Conflict resolution: if local is not dirty and remote updated is newer -> pull
             local_updated = local['updated']
             local_dirty = local['dirty']
 
@@ -439,7 +427,6 @@ def pull_remote_changes(conn, service, stdscr=None):
                         if ru and lu and ru > lu:
                             should_pull = True
                     except Exception:
-                        # If timestamps are unparsable, prefer remote to avoid stale state
                         should_pull = True
 
             if should_pull:
@@ -450,7 +437,6 @@ def pull_remote_changes(conn, service, stdscr=None):
                 ''', (title, notes, mmdd, done, etag, updated, local['id']))
                 conn.commit()
         else:
-            # New remote task → insert locally at end
             max_pos += 1
             cur.execute('''
                 INSERT INTO tasks (text, pos, completion_date, details, done, google_id, etag, updated, dirty)
@@ -458,9 +444,168 @@ def pull_remote_changes(conn, service, stdscr=None):
             ''', (title, max_pos, mmdd, notes, done, gid, etag, updated))
             conn.commit()
 
+# ---- Minimal-move reordering using LIS ---------------------------------------
+
+def _lis_indices(seq: List[int]) -> List[int]:
+    """
+    Return indices of one Longest Increasing Subsequence in 'seq' (strictly increasing),
+    using patience sorting with predecessor reconstruction. O(n log n).
+    """
+    if not seq:
+        return []
+
+    # tails[k] = index in seq of the smallest tail of all increasing subsequences of length k+1
+    tails: List[int] = []
+    prev: List[Optional[int]] = [None] * len(seq)
+    # positions[k] = seq index where LIS of length k+1 ends
+    positions: List[int] = []
+
+    from bisect import bisect_left
+
+    for i, x in enumerate(seq):
+        # Find insertion point in tails using current values
+        vals = [seq[t] for t in tails]
+        j = bisect_left(vals, x)
+        if j == len(tails):
+            tails.append(i)
+            positions.append(i)
+        else:
+            tails[j] = i
+            positions[j] = i
+        prev[i] = tails[j-1] if j > 0 else None
+
+    # Reconstruct indices from last tail
+    lis_end = tails[-1]
+    lis_indices = []
+    while lis_end is not None:
+        lis_indices.append(lis_end)
+        lis_end = prev[lis_end]  # type: ignore
+    lis_indices.reverse()
+    return lis_indices
+
+def _fetch_remote_order_ids(service, tasklist: str, id_filter: set) -> List[str]:
+    """Return remote task IDs in their current Google order, filtered to id_filter."""
+    ordered = []
+    page_token = None
+    while True:
+        kwargs = dict(tasklist=tasklist, showCompleted=True, showHidden=True, showDeleted=False)
+        if page_token:
+            kwargs['pageToken'] = page_token
+        resp = service.tasks().list(**kwargs).execute()
+        for it in resp.get('items', []):
+            gid = it.get('id')
+            if gid and gid in id_filter:
+                ordered.append(gid)
+        page_token = resp.get('nextPageToken')
+        if not page_token:
+            break
+    return ordered
+
+def ensure_remote_order_matches_local_min_moves(
+    conn,
+    service,
+    stdscr=None,
+    tasklist='@default',
+    dry_run=False,
+    move_limit=None,
+    sleep_between=0.15
+):
+    """
+    Minimize moves by computing an LIS of the remote order mapped into desired local order.
+    Only tasks NOT in the LIS are moved. Result exactly matches local 'pos' order.
+
+    Steps:
+      1) desired_ids = local Google-linked tasks ordered by local pos.
+      2) remote_in_desired = remote order filtered to desired_ids.
+      3) Map each remote ID -> desired index; create sequence of desired indices.
+      4) Compute LIS of that sequence -> those are already in correct relative order.
+      5) Iterate desired_ids top→bottom, moving only IDs not in LIS, placing after last placed.
+    """
+    if service is None:
+        return
+
+    cur = conn.cursor()
+    cur.execute('''
+        SELECT google_id, text
+        FROM tasks
+        WHERE google_id IS NOT NULL
+        ORDER BY pos ASC
+    ''')
+    rows = cur.fetchall()
+    desired_ids = [r['google_id'] for r in rows]
+    if not desired_ids:
+        _notify(stdscr, "Order sync: no Google-linked tasks to reorder.")
+        return
+
+    desired_set = set(desired_ids)
+    remote_in_desired = _fetch_remote_order_ids(service, tasklist, desired_set)
+
+    # Some tasks might be missing remotely; filter desired_ids to those that exist remotely
+    remote_set = set(remote_in_desired)
+    filtered_desired_ids = [gid for gid in desired_ids if gid in remote_set]
+    if not filtered_desired_ids:
+        _notify(stdscr, "Order sync: none of the desired tasks exist remotely; skipping.")
+        return
+
+    # Map desired_id -> desired index
+    desired_index = {gid: i for i, gid in enumerate(filtered_desired_ids)}
+
+    # Build sequence of desired indices in current remote order (only those present in filtered_desired_ids)
+    seq = [desired_index[gid] for gid in remote_in_desired if gid in desired_index]
+
+    # Compute LIS over 'seq' -> returns indices into 'seq'; translate back to remote_in_desired gids
+    lis_seq_indices = _lis_indices(seq)
+    lis_gids = {remote_in_desired[i] for i in lis_seq_indices}
+
+    # Now walk the target desired order; place only items not in LIS.
+    moves_done = 0
+    anchor = None  # last placed gid in final order
+    for gid in filtered_desired_ids:
+        if move_limit is not None and moves_done >= move_limit:
+            _notify(stdscr, f"Order sync: hit move_limit ({move_limit}); stopping early.")
+            break
+
+        # If gid is already in LIS, treat it as placed without moving (just advance anchor)
+        if gid in lis_gids:
+            anchor = gid
+            continue
+
+        try:
+            if dry_run:
+                if anchor:
+                    _notify(stdscr, f"[dry-run] would move {gid} after {anchor}")
+                else:
+                    _notify(stdscr, f"[dry-run] would move {gid} to top")
+            else:
+                if anchor:
+                    service.tasks().move(tasklist=tasklist, task=gid, previous=anchor).execute()
+                else:
+                    service.tasks().move(tasklist=tasklist, task=gid).execute()
+                moves_done += 1
+                if sleep_between:
+                    time.sleep(sleep_between)
+        except Exception as e:
+            log_exception(e)
+            # light retry
+            try:
+                time.sleep(0.6)
+                if anchor:
+                    service.tasks().move(tasklist=tasklist, task=gid, previous=anchor).execute()
+                else:
+                    service.tasks().move(tasklist=tasklist, task=gid).execute()
+                moves_done += 1
+            except Exception as e2:
+                log_exception(e2)
+                _notify(stdscr, f"Order sync: move failed for {gid}: {e2}")
+
+        anchor = gid
+
+    _notify(stdscr, f"Order sync (min-moves) complete. Moves issued: {moves_done} (kept {len(lis_gids)} in place).")
+
 def full_sync(conn, stdscr=None, client_secret_path: Optional[str] = None, token_path: Optional[str] = None):
     """
-    Bi-directional sync: push local dirty first, then pull remote changes.
+    Bi-directional sync: push local dirty first, then pull remote changes,
+    then align remote order to match local 'pos' with minimal moves.
     """
     service = get_google_service(stdscr, client_secret_path, token_path)
     if not service:
@@ -470,6 +615,18 @@ def full_sync(conn, stdscr=None, client_secret_path: Optional[str] = None, token
     push_local_changes(conn, service, stdscr)
     _notify(stdscr, "Sync: pulling remote changes…")
     pull_remote_changes(conn, service, stdscr)
+
+    _notify(stdscr, "Sync: aligning Google order (min moves)…")
+    ensure_remote_order_matches_local_min_moves(
+        conn,
+        service,
+        stdscr=stdscr,
+        tasklist=ensure_default_tasklist(service),
+        dry_run=False,          # set True to preview without changes
+        move_limit=None,        # cap if you ever need to
+        sleep_between=0.12
+    )
+
     _notify(stdscr, "Sync complete.")
 
 # ------------- Curses UI -----------------
@@ -556,7 +713,6 @@ def main(stdscr, db_path, client_secret_path=None, token_path=None):
     else:
         curses.init_pair(6, curses.COLOR_WHITE, curses.COLOR_BLACK)
 
-    # Preflight tip
     if not _find_client_secret(client_secret_path):
         _notify(stdscr, "Tip: supply client_secret.json (flag/env/cwd). Press G to test OAuth.")
 
@@ -579,10 +735,7 @@ def main(stdscr, db_path, client_secret_path=None, token_path=None):
                 break
             continue
 
-        if moving_task_index is None:
-            tasks = get_tasks(conn, current_order)
-        else:
-            tasks = reorder_list
+        tasks = reorder_list if moving_task_index is not None else get_tasks(conn, current_order)
         num_tasks = len(tasks)
         if current_selection >= num_tasks:
             current_selection = num_tasks - 1
@@ -661,11 +814,9 @@ def main(stdscr, db_path, client_secret_path=None, token_path=None):
             except curses.error:
                 pass
 
-        if moving_task_index is None:
-            instruction = ("a=add, Del=remove, space=move, d=done, e=edit, o=order, "
-                           "g=sync, G=OAuth test, q=quit")
-        else:
-            instruction = "Moving task. Use arrows to reposition. Space to confirm."
+        instruction = ("a=add, Del=remove, space=move, d=done, e=edit, o=order, "
+                       "g=sync, G=OAuth test, q=quit") if moving_task_index is None \
+                     else "Moving task. Use arrows to reposition. Space to confirm."
         try:
             stdscr.addstr(max_y - 2, 0, instruction[:max_x-1])
         except curses.error:
@@ -789,7 +940,7 @@ if __name__ == '__main__':
             stdscr=None,
             client_secret_path=args.client_secret,
             token_path=args.token
-        )  # prints to stdout instead of using curses
+        )
         if svc:
             try:
                 svc.tasklists().get(tasklist='@default').execute()
