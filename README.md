@@ -23,10 +23,11 @@ Stores tasks locally in SQLite and can **sync bidirectionally** with Google Task
 - **Keyboard Shortcuts**
   - `a` — Add task
   - `d` — Mark done/undone
-  - `e` — Edit task
+  - `e` / `Enter` — Edit task
   - `Del` — Delete task
   - `space` — Move task
   - `o` — Order by task or date
+  - `/` — Search tasks (type to filter, ↑/↓ to jump between matches, Enter to confirm, Esc to cancel)
   - `g` — Sync with Google Tasks
   - `G` — Run OAuth test
   - `q` — Quit
