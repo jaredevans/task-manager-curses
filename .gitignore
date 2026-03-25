@@ -1,0 +1,6 @@
+.claude/
+client_secret.json
+token_personal.json
+token_work.json
+personal_tasks.db
+tasks.db

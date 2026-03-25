@@ -707,6 +707,7 @@ def main(stdscr, db_path, client_secret_path=None, token_path=None):
     curses.init_pair(3, curses.COLOR_GREEN, curses.COLOR_BLACK)
     curses.init_pair(4, curses.COLOR_WHITE, curses.COLOR_BLACK)
     curses.init_pair(5, curses.COLOR_CYAN, curses.COLOR_BLACK)
+    curses.init_pair(7, curses.COLOR_BLACK, curses.COLOR_YELLOW)  # search highlight
     if curses.can_change_color():
         curses.init_color(8, 300, 300, 300)
         curses.init_pair(6, 8, curses.COLOR_BLACK)
@@ -721,6 +722,11 @@ def main(stdscr, db_path, client_secret_path=None, token_path=None):
     moving_task_index = None
     reorder_list = None
     scroll_offset = 0
+    search_mode = False
+    search_query = ""
+    search_matches = []  # indices of matching tasks
+    search_match_idx = 0  # which match we're on
+    pre_search_selection = 0
 
     while True:
         stdscr.clear()
@@ -799,7 +805,30 @@ def main(stdscr, db_path, client_secret_path=None, token_path=None):
                 date_style = base_date_color
 
             try:
-                stdscr.addstr(row, 0, text_part, text_style)
+                # Render task text with search highlighting
+                if search_mode and search_query and search_query.lower() in text.lower():
+                    # Draw text_part with highlighted matches
+                    col = 0
+                    prefix = f"{idx + 1}. "
+                    stdscr.addstr(row, col, prefix, text_style)
+                    col += len(prefix)
+                    lower_text = text.lower()
+                    lower_q = search_query.lower()
+                    i = 0
+                    while i < len(text):
+                        match_pos = lower_text.find(lower_q, i)
+                        if match_pos == -1:
+                            stdscr.addstr(row, col, text[i:], text_style)
+                            col += len(text) - i
+                            break
+                        if match_pos > i:
+                            stdscr.addstr(row, col, text[i:match_pos], text_style)
+                            col += match_pos - i
+                        stdscr.addstr(row, col, text[match_pos:match_pos+len(search_query)], curses.color_pair(7) | curses.A_BOLD)
+                        col += len(search_query)
+                        i = match_pos + len(search_query)
+                else:
+                    stdscr.addstr(row, 0, text_part, text_style)
                 stdscr.addstr(row, len(text_part), details_part, details_style)
                 stdscr.addstr(row, len(text_part) + len(details_part), date_part, date_style)
                 stdscr.addstr(row, len(text_part) + len(details_part) + len(date_part), days_field, date_style)
@@ -814,16 +843,89 @@ def main(stdscr, db_path, client_secret_path=None, token_path=None):
             except curses.error:
                 pass
 
-        instruction = ("a=add, Del=remove, space=move, d=done, e=edit, o=order, "
-                       "g=sync, G=OAuth test, q=quit") if moving_task_index is None \
-                     else "Moving task. Use arrows to reposition. Space to confirm."
+        if search_mode:
+            search_line = f"/{search_query}"
+            match_info = f"  [{search_match_idx+1}/{len(search_matches)}]" if search_matches else "  [no matches]"
+            instruction = search_line + match_info
+        elif moving_task_index is not None:
+            instruction = "Moving task. Use arrows to reposition. Space to confirm."
+        else:
+            instruction = ("a=add, Del=remove, space=move, d=done, e=edit, o=order, "
+                           "/=search, g=sync, G=OAuth test, q=quit")
         try:
+            stdscr.addstr(max_y - 2, 0, " " * (max_x - 1))
             stdscr.addstr(max_y - 2, 0, instruction[:max_x-1])
         except curses.error:
             pass
 
         stdscr.refresh()
         key = stdscr.getch()
+
+        # --- Search mode input handling ---
+        if search_mode:
+            if key in (curses.KEY_ENTER, 10, 13):
+                # Confirm search, stay on current selection
+                search_mode = False
+                search_query = ""
+                search_matches = []
+                search_match_idx = 0
+            elif key == 27:  # Escape - cancel search
+                search_mode = False
+                current_selection = pre_search_selection
+                search_query = ""
+                search_matches = []
+                search_match_idx = 0
+                # Adjust scroll
+                if current_selection < scroll_offset:
+                    scroll_offset = current_selection
+                elif current_selection >= scroll_offset + visible_tasks:
+                    scroll_offset = current_selection - visible_tasks + 1
+            elif key in (curses.KEY_BACKSPACE, 127, 8):
+                if search_query:
+                    search_query = search_query[:-1]
+                    # Recalculate matches
+                    search_matches = [i for i, t in enumerate(tasks) if search_query and search_query.lower() in t[1].lower()]
+                    if search_matches:
+                        search_match_idx = 0
+                        current_selection = search_matches[0]
+                    else:
+                        search_match_idx = 0
+                else:
+                    # Empty query + backspace = cancel
+                    search_mode = False
+                    current_selection = pre_search_selection
+                    search_matches = []
+                    search_match_idx = 0
+            elif key == curses.KEY_UP:
+                if search_matches:
+                    search_match_idx = (search_match_idx - 1) % len(search_matches)
+                    current_selection = search_matches[search_match_idx]
+                    if current_selection < scroll_offset:
+                        scroll_offset = current_selection
+                    elif current_selection >= scroll_offset + visible_tasks:
+                        scroll_offset = current_selection - visible_tasks + 1
+            elif key == curses.KEY_DOWN:
+                if search_matches:
+                    search_match_idx = (search_match_idx + 1) % len(search_matches)
+                    current_selection = search_matches[search_match_idx]
+                    if current_selection < scroll_offset:
+                        scroll_offset = current_selection
+                    elif current_selection >= scroll_offset + visible_tasks:
+                        scroll_offset = current_selection - visible_tasks + 1
+            elif 32 <= key <= 126:
+                search_query += chr(key)
+                # Recalculate matches
+                search_matches = [i for i, t in enumerate(tasks) if search_query.lower() in t[1].lower()]
+                if search_matches:
+                    search_match_idx = 0
+                    current_selection = search_matches[0]
+                    if current_selection < scroll_offset:
+                        scroll_offset = current_selection
+                    elif current_selection >= scroll_offset + visible_tasks:
+                        scroll_offset = current_selection - visible_tasks + 1
+                else:
+                    search_match_idx = 0
+            continue
 
         if key == ord('q'):
             break
@@ -878,7 +980,7 @@ def main(stdscr, db_path, client_secret_path=None, token_path=None):
                 task = tasks[current_selection]
                 task_id, _, _, _, _, done = task
                 toggle_task_done(conn, task_id, done)
-        elif key == ord('e') and moving_task_index is None:
+        elif key in (ord('e'), curses.KEY_ENTER, 10, 13) and moving_task_index is None:
             if num_tasks > 0:
                 task = tasks[current_selection]
                 task_id, text, pos, comp_date, details, done = task
@@ -899,6 +1001,12 @@ def main(stdscr, db_path, client_secret_path=None, token_path=None):
                     current_selection = moving_task_index
                     moving_task_index = None
                     reorder_list = None
+        elif key == ord('/') and moving_task_index is None:
+            search_mode = True
+            search_query = ""
+            search_matches = []
+            search_match_idx = 0
+            pre_search_selection = current_selection
         elif key == ord('g'):  # sync with Google
             try:
                 notify_popup(stdscr, "Starting Google sync…\n(May open a browser on first run)", wait_for_key=False)
